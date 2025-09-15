@@ -62,14 +62,49 @@ export default function Chatbot() {
     if (!q) return
     setInput('')
     sendUser(q)
-    const res = await postJSON('/api/answer', { q }) as any
-    if (Array.isArray(res.messages)) {
-      res.messages.forEach((m: any) => pushBot(m.text, m.sources))
-    } else if (res.text) {
-      pushBot(res.text, res.sources)
-    } else {
-      pushBot('Sorry, I could not find an answer.')
+    try {
+      await streamAnswer(q)
+    } catch (e) {
+      // fallback to non-streaming
+      const res = await postJSON('/api/answer', { q }) as any
+      if (Array.isArray(res.messages)) {
+        res.messages.forEach((m: any) => pushBot(m.text, m.sources))
+      } else if (res.text) {
+        pushBot(res.text, res.sources)
+      } else {
+        pushBot('Sorry, I could not find an answer.')
+      }
     }
+  }
+
+  async function streamAnswer(q: string) {
+    // create a pending bot message and stream tokens into it
+    const id = `b-${Date.now()}`
+    setMessages((m) => [...m, { id, role: 'bot', text: '' }])
+    const url = `/api/answer-stream?q=${encodeURIComponent(q)}`
+    const resp = await fetch(url)
+    if (!resp.ok || !resp.body) throw new Error('stream error')
+    const reader = resp.body.getReader()
+    const decoder = new TextDecoder()
+    let buffer = ''
+    while (true) {
+      const { done, value } = await reader.read()
+      if (done) break
+      buffer += decoder.decode(value, { stream: true })
+      let idx
+      while ((idx = buffer.indexOf('\n\n')) !== -1) {
+        const chunk = buffer.slice(0, idx)
+        buffer = buffer.slice(idx + 2)
+        if (!chunk.startsWith('data: ')) continue
+        const json = JSON.parse(chunk.slice(6))
+        if (json.type === 'token') {
+          setMessages((m) => m.map((mm) => mm.id === id ? { ...mm, text: (mm.text || '') + json.token } : mm))
+        } else if (json.type === 'done') {
+          setMessages((m) => m.map((mm) => mm.id === id ? { ...mm, sources: json.sources } : mm))
+        }
+      }
+    }
+    setAnswersCount((c) => c + 1)
   }
 
   // Nudge after two answers
